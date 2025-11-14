@@ -6,6 +6,10 @@ Parameters:
     Type: String
     Default: ""
     Description: Optional Lambda layer ARN containing paramiko
+  S3BucketName:
+    Type: String
+    Description: S3 bucket name to receive uploads
+    Default: sftp-file-storage-v3
 
 Conditions:
   UseParamikoLayer: !Not [ !Equals [ !Ref ParamikoLayerArn, "" ] ]
@@ -16,7 +20,7 @@ Resources:
   S3BucketV3:
     Type: AWS::S3::Bucket
     Properties:
-      BucketName: sftp-file-storage-v3
+      BucketName: !Ref S3BucketName
 
   # --- Secrets Manager ---
   SftpCredentialsSecretV3:
@@ -53,7 +57,7 @@ Resources:
               - Effect: Allow
                 Action:
                   - s3:GetObject
-                Resource: arn:aws:s3:::sftp-file-storage-v3/*
+                Resource: !Sub arn:aws:s3:::${S3BucketName}/*
               - Effect: Allow
                 Action:
                   - secretsmanager:GetSecretValue
@@ -165,6 +169,7 @@ Resources:
     Properties:
       VpcId: !Ref VPCv3
 
+  # Route for private subnets to NAT
   PrivateRoute1V3:
     Type: AWS::EC2::Route
     Properties:
@@ -295,6 +300,25 @@ Resources:
         - UseParamikoLayer
         - [!Ref ParamikoLayerArn]
         - !Ref AWS::NoValue
+
+  LambdaInvokePermissionFromS3:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt SftpTransferFunctionV3.Arn
+      Action: lambda:InvokeFunction
+      Principal: s3.amazonaws.com
+      SourceArn: !Sub arn:aws:s3:::${S3BucketName}
+
+  S3BucketNotification:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref S3BucketName
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: 's3:ObjectCreated:*'
+            Function: !GetAtt SftpTransferFunctionV3.Arn
+    DependsOn:
+      - LambdaInvokePermissionFromS3
 
 Outputs:
   BucketName:
