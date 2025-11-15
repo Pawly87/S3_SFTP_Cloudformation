@@ -1,0 +1,305 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Environment-specific CloudFormation template for SFTP transfer Lambda
+  inside a VPC with 2 NAT gateways, 2 public subnets and 2 private
+  subnets (well-architected pattern). Includes S3 bucket, Secrets Manager
+  secret, IAM role, and security group.
+
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues: [dev, staging, prod]
+    Default: dev
+    Description: Deployment environment
+
+  ParamikoLayerArn:
+    Type: String
+    Default: ""
+    Description: Optional Lambda layer ARN containing paramiko
+
+  S3BucketBase:
+    Type: String
+    Default: sftp-file-storage
+    Description: Base name for S3 bucket
+
+Conditions:
+  UseParamikoLayer: !Not [ !Equals [ !Ref ParamikoLayerArn, "" ] ]
+
+Mappings:
+  AZIndexToSuffix:
+    "0":
+      Suffix: az-a
+    "1":
+      Suffix: az-b
+
+Resources:
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.3.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub "sftp-vpc-${Environment}-${AWS::AccountId}-${AWS::Region}-${AWS::StackName}"
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnetAZ1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.3.0.0/24
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select [0, !GetAZs ""]
+
+  PublicSubnetAZ2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.3.1.0/24
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select [1, !GetAZs ""]
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+
+  PublicRouteDefault:
+    Type: AWS::EC2::Route
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1RouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetAZ1
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnet2RouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetAZ2
+      RouteTableId: !Ref PublicRouteTable
+
+  EIPNat1:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+
+  EIPNat2:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+
+  NatGateway1:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt EIPNat1.AllocationId
+      SubnetId: !Ref PublicSubnetAZ1
+
+  NatGateway2:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt EIPNat2.AllocationId
+      SubnetId: !Ref PublicSubnetAZ2
+
+  PrivateSubnetAZ1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.3.100.0/24
+      AvailabilityZone: !Select [0, !GetAZs ""]
+
+  PrivateSubnetAZ2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.3.101.0/24
+      AvailabilityZone: !Select [1, !GetAZs ""]
+
+  PrivateRouteTableAZ1:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+
+  PrivateRouteTableAZ2:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+
+  PrivateRouteAZ1:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTableAZ1
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway1
+
+  PrivateRouteAZ2:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTableAZ2
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway2
+
+  PrivateSubnet1Assoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetAZ1
+      RouteTableId: !Ref PrivateRouteTableAZ1
+
+  PrivateSubnet2Assoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetAZ2
+      RouteTableId: !Ref PrivateRouteTableAZ2
+
+  LambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Lambda outbound SG
+      VpcId: !Ref VPC
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${S3BucketBase}-${Environment}-${AWS::AccountId}-${AWS::Region}-${AWS::StackName}"
+
+  SftpCredentialsSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "sftp-credentials-${Environment}-${AWS::AccountId}-${AWS::Region}-${AWS::StackName}"
+      Description: SFTP credentials JSON
+      SecretString: !Sub |
+        {
+          "host": "",
+          "username": "",
+          "password": ""
+        }
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "sftp-transfer-role-${Environment}-${AWS::AccountId}-${AWS::Region}-${AWS::StackName}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [lambda.amazonaws.com]
+            Action: [sts:AssumeRole]
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Policies:
+        - PolicyName: S3AndSecretsAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [s3:GetObject, s3:ListBucket]
+                Resource:
+                  - !Sub arn:aws:s3:::${S3Bucket}
+                  - !Sub arn:aws:s3:::${S3Bucket}/*
+              - Effect: Allow
+                Action: [secretsmanager:GetSecretValue]
+                Resource: !Ref SftpCredentialsSecret
+
+  SftpTransferFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "sftp-transfer-lambda-${Environment}-${AWS::AccountId}-${AWS::Region}"
+      Runtime: python3.12
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 60
+      MemorySize: 512
+      Environment:
+        Variables:
+          BUCKET: !Ref S3Bucket
+          SECRET_ARN: !Ref SftpCredentialsSecret
+      VpcConfig:
+        SubnetIds:
+          - !Ref PrivateSubnetAZ1
+          - !Ref PrivateSubnetAZ2
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+      Code:
+        ZipFile: |
+          import json
+          import os
+          import logging
+          import boto3
+          import paramiko
+          from io import BytesIO
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          s3 = boto3.client("s3")
+          secrets = boto3.client("secretsmanager")
+
+          def lambda_handler(event, context):
+              logger.info("Lambda triggered with event: %s", json.dumps(event))
+
+              secret_arn = os.environ["SECRET_ARN"]
+              secret = json.loads(secrets.get_secret_value(SecretId=secret_arn)["SecretString"])
+
+              host = secret["host"]
+              username = secret["username"]
+              password = secret.get("password")
+
+              if not password:
+                  raise Exception("Password is required; private key authentication has been removed.")
+
+              transport = paramiko.Transport((host, 22))
+              transport.connect(username=username, password=password)
+
+              sftp = paramiko.SFTPClient.from_transport(transport)
+
+              bucket = os.environ["BUCKET"]
+
+              # List S3 files
+              objects = s3.list_objects_v2(Bucket=bucket)
+              if "Contents" not in objects:
+                  logger.info("No objects in bucket.")
+                  return {"status": "empty"}
+
+              for obj in objects["Contents"]:
+                  key = obj["Key"]
+                  tmp_file = f"/tmp/{os.path.basename(key)}"
+
+                  s3.download_file(bucket, key, tmp_file)
+                  logger.info(f"Uploading {key} to SFTP…")
+
+                  sftp.put(tmp_file, os.path.basename(key))
+
+              sftp.close()
+              transport.close()
+
+              return {"status": "success"}
+
+Outputs:
+  BucketName:
+    Value: !Ref S3Bucket
+  LambdaArn:
+    Value: !GetAtt SftpTransferFunction.Arn
+  SecretArn:
+    Value: !Ref SftpCredentialsSecret
+    Description: Update this secret with your SFTP credentials (host, username, password)
+  VpcId:
+    Value: !Ref VPC
