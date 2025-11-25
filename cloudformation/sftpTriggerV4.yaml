@@ -177,7 +177,7 @@ Resources:
   S3Bucket:
     Type: AWS::S3::Bucket
     Properties:
-      BucketName: !Sub "${S3BucketBase}-${Environment}-${AWS::AccountId}-${AWS::Region}-${AWS::StackName}"
+      BucketName: !Sub "${S3BucketBase}-${Environment}-${AWS::AccountId}-${AWS::StackName}"
 
   SftpCredentialsSecret:
     Type: AWS::SecretsManager::Secret
@@ -194,7 +194,7 @@ Resources:
   LambdaExecutionRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: !Sub "sftp-transfer-role-${Environment}-${AWS::AccountId}-${AWS::Region}-${AWS::StackName}"
+      RoleName: !Sub "sftp-transfer-role-${Environment}-${AWS::AccountId}-${AWS::StackName}"
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
